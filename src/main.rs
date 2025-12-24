@@ -466,8 +466,8 @@ fn write_color(color: Vec3, samples_per_pixel: i32) -> (u8, u8, u8) {
 
 fn main() {
     // 图片设置
-    let width = 400;
-    let height = 225;
+    let width = 450 * 2;
+    let height = 300 * 2;
     let aspect_ratio = width as f64 / height as f64;
 
     // 相机设置
@@ -480,42 +480,42 @@ fn main() {
     let vertical = Vec3::new(0.0, viewport_height, 0.0);
     let lower_left = origin - horizontal * 0.5 - vertical * 0.5 - Vec3::new(0.0, 0.0, focal_length);
 
-    let material_ground = Rc::new(Lambertian::new(Vec3::new(0.8, 0.8, 0.0)));
-    let material_center = Rc::new(Dielectric::new(1.5));
-    let material_left = Rc::new(Metal::new(Vec3::new(0.8, 0.8, 0.8), 0.3));
-    let material_right = Rc::new(Metal::new(Vec3::new(0.8, 0.6, 0.2), 1.0));
-
     // 创建场景
     let mut world = HittableList::new();
 
-    // 添加小球（中心的球）
     world.add(Box::new(Sphere::new(
-        Vec3::new(0.0, 0.0, -1.0),
-        0.5,
-        material_center,
+        Vec3::new(-0.85, -0.1, -1.2),
+        0.4,
+        Rc::new(Metal::new(Vec3::new(0.8, 0.8, 0.8), 0.3)),
     )));
+
     world.add(Box::new(Sphere::new(
-        Vec3::new(0.0, 0.0, -1.0),
-        -0.3,
+        Vec3::new(0.0, -0.1, -1.0),
+        0.3,
         Rc::new(Dielectric::new(1.5)),
     )));
-    // 添加左侧球体
     world.add(Box::new(Sphere::new(
-        Vec3::new(-1.5, 0.5, -1.5),
-        0.5,
-        material_left,
+        Vec3::new(0.0, -0.1, -1.0),
+        -0.16,
+        Rc::new(Dielectric::new(1.5)),
     )));
-    // 添加右侧球体
+
     world.add(Box::new(Sphere::new(
-        Vec3::new(0.6, 0.0, -1.5),
-        0.5,
-        material_right,
+        Vec3::new(0.85, -0.1, -1.2),
+        0.4,
+        Rc::new(Metal::new(Vec3::new(0.8, 0.8, 0.8), 0.3)),
+    )));
+    // 前
+    world.add(Box::new(Sphere::new(
+        Vec3::new(0.05, 0.2, -0.7),
+        0.1,
+        Rc::new(Lambertian::new(Vec3::new(0.1, 0.2, 0.5))),
     )));
     // 添加地面（一个巨大的球）
     world.add(Box::new(Sphere::new(
-        Vec3::new(0.0, -100.5, -1.0),
+        Vec3::new(0.0, -100.8, -1.0),
         100.0,
-        material_ground,
+        Rc::new(Lambertian::new(Vec3::new(0.8, 0.8, 0.0))),
     )));
 
     // 渲染
