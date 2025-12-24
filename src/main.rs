@@ -220,6 +220,66 @@ impl Material for Metal {
     }
 }
 
+struct Dielectric {
+    ir: f64, // 折射率（Index of Refraction）
+}
+
+impl Dielectric {
+    fn new(ir: f64) -> Self {
+        Dielectric { ir }
+    }
+
+    // Schlick 近似：计算菲涅尔反射率
+    fn reflectance(cosine: f64, ref_idx: f64) -> f64 {
+        let r0 = ((1.0 - ref_idx) / (1.0 + ref_idx)).powi(2);
+        r0 + (1.0 - r0) * (1.0 - cosine).powi(5)
+    }
+}
+
+impl Material for Dielectric {
+    fn scatter(
+        &self,
+        ray_in: &Ray,
+        rec: &HitRecord,
+        attenuation: &mut Vec3,
+        scattered: &mut Ray,
+    ) -> bool {
+        *attenuation = Vec3::new(1.0, 1.0, 1.0); // 玻璃不吸收颜色
+
+        // 计算折射率比
+        let refraction_ratio = if rec.front_face {
+            1.0 / self.ir // 从空气进入玻璃
+        } else {
+            self.ir // 从玻璃进入空气
+        };
+
+        let unit_direction = ray_in.direction.unit();
+        let cos_theta = (unit_direction * -1.0).dot(&rec.normal).min(1.0);
+        let sin_theta = (1.0 - cos_theta * cos_theta).sqrt();
+
+        // 判断是否发生全反射
+        let cannot_refract = refraction_ratio * sin_theta > 1.0;
+
+        let direction = if cannot_refract
+            || Dielectric::reflectance(cos_theta, refraction_ratio)
+                > rand::thread_rng().gen_range(0.0..1.0)
+        {
+            // 反射
+            unit_direction.reflect(&rec.normal)
+        } else {
+            // 折射
+            unit_direction.refract(&rec.normal, refraction_ratio)
+        };
+
+        *scattered = Ray {
+            origin: rec.point,
+            direction,
+        };
+
+        true
+    }
+}
+
 #[derive(Clone)]
 struct HitRecord {
     point: Vec3,
@@ -421,7 +481,7 @@ fn main() {
     let lower_left = origin - horizontal * 0.5 - vertical * 0.5 - Vec3::new(0.0, 0.0, focal_length);
 
     let material_ground = Rc::new(Lambertian::new(Vec3::new(0.8, 0.8, 0.0)));
-    let material_center = Rc::new(Lambertian::new(Vec3::new(0.7, 0.3, 0.3)));
+    let material_center = Rc::new(Dielectric::new(1.5));
     let material_left = Rc::new(Metal::new(Vec3::new(0.8, 0.8, 0.8), 0.3));
     let material_right = Rc::new(Metal::new(Vec3::new(0.8, 0.6, 0.2), 1.0));
 
@@ -434,6 +494,11 @@ fn main() {
         0.5,
         material_center,
     )));
+    world.add(Box::new(Sphere::new(
+        Vec3::new(0.0, 0.0, -1.0),
+        -0.3,
+        Rc::new(Dielectric::new(1.5)),
+    )));
     // 添加左侧球体
     world.add(Box::new(Sphere::new(
         Vec3::new(-1.5, 0.5, -1.5),
@@ -442,7 +507,7 @@ fn main() {
     )));
     // 添加右侧球体
     world.add(Box::new(Sphere::new(
-        Vec3::new(1.0, 0.0, -1.5),
+        Vec3::new(0.6, 0.0, -1.5),
         0.5,
         material_right,
     )));
@@ -457,7 +522,7 @@ fn main() {
     let mut file = File::create("output.ppm").unwrap();
     writeln!(file, "P3\n{} {}\n255", width, height).unwrap();
 
-    let max_depth = 100;
+    let max_depth = 50;
     let samples_per_pixel = 100;
 
     let mut rng = rand::thread_rng();
