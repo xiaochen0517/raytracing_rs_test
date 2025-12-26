@@ -3,6 +3,7 @@ mod hitrecord;
 mod light;
 mod material;
 mod ray;
+mod utils;
 mod vector;
 
 use crate::ray::Ray;
@@ -37,21 +38,24 @@ fn sample_direct_light(rec: &HitRecord, world: &dyn Hittable, lights: &[Arc<dyn 
         let to_light = light_point - rec.point;
         let distance_to_light = to_light.length();
         let direction_to_light = to_light.unit();
+        if distance_to_light < 0.001 || !distance_to_light.is_finite() {
+            continue; // 距离过近或无穷大，跳过
+        }
         // 3. 检查是否是背面光照
         let cos_surface = rec.normal.dot(&direction_to_light);
-        if cos_surface <= 0.0 {
+        if cos_surface <= 0.001 {
             continue; // 背面光照，跳过
         }
         // 4. 检查光线是否被遮挡
         let shadow_ray = Ray {
-            origin: rec.point,
+            origin: rec.point + rec.normal * 0.001,
             direction: direction_to_light,
         };
         let mut shadow_rec = HitRecord::new();
         if world.hit(
             &shadow_ray,
             0.001,
-            distance_to_light - 0.001,
+            distance_to_light - 0.01,
             &mut shadow_rec,
         ) {
             continue; // 被遮挡，跳过
@@ -60,11 +64,19 @@ fn sample_direct_light(rec: &HitRecord, world: &dyn Hittable, lights: &[Arc<dyn 
         let light_power = light.emitted(0.0, 0.0, &light_point);
         // 6. 计算光源面积和 PDF
         let light_area = light.area();
+        if light_area < 0.0001 {
+            continue; // 面积无效，跳过
+        }
         let pdf = 1.0 / light_area; // 均匀采样概率密度函数
+        let distance_sq = distance_to_light * distance_to_light;
+        if distance_sq < 0.0001 {
+            continue; // 距离平方无效，跳过
+        }
         // 7. 计算直接光照贡献 L = Le * cos(theta) / (distance^2 * pdf)
-        let direct_light =
-            light_power * cos_surface / (distance_to_light * distance_to_light * pdf);
-        total_light = total_light + direct_light;
+        let contribution = light_power * cos_surface / (distance_sq * pdf);
+        if contribution.x.is_finite() && contribution.y.is_finite() && contribution.z.is_finite() {
+            total_light = total_light + contribution;
+        }
     }
 
     total_light
@@ -147,9 +159,9 @@ const RELEASE_CONFIG: Config = Config {
 
 const DEBUG_CONFIG: Config = Config {
     image_width: 300,
-    image_height: 200,
-    samples_per_pixel: 20,
-    max_depth: 10,
+    image_height: 300,
+    samples_per_pixel: 100,
+    max_depth: 30,
 };
 
 const BOX_SIZE: f64 = 2.0;
@@ -244,8 +256,8 @@ fn cornell_box() -> (HittableList, Vec<Arc<dyn Light>>) {
 }
 
 fn main() {
-    // let config = DEBUG_CONFIG;
-    let config = RELEASE_CONFIG;
+    let config = DEBUG_CONFIG;
+    // let config = RELEASE_CONFIG;
     let width = config.image_width;
     let height = config.image_height;
 
@@ -330,12 +342,17 @@ fn main() {
 
     eprintln!("\r进度: {}/{} (100. 0%)", total_pixels, total_pixels);
 
+    // === 降噪后处理 ===
+
+    eprintln!("开始降噪处理...");
+    let denoised_colors = utils::bilateral_filter(&pixel_colors, width, height, 2.5, 25.0, 3);
+
     // === 写入文件 ===
 
     let mut file = File::create("output.ppm").unwrap();
     writeln!(file, "P3\n{} {}\n255", width, height).unwrap();
 
-    for (ir, ig, ib) in pixel_colors {
+    for (ir, ig, ib) in denoised_colors {
         writeln!(file, "{} {} {}", ir, ig, ib).unwrap();
     }
 
