@@ -1,724 +1,80 @@
+mod camera;
+mod hitrecord;
+mod light;
+mod material;
+mod ray;
+mod vector;
+
+use crate::ray::Ray;
+use crate::vector::Vec3;
 use rand::Rng;
 use rayon::prelude::*;
-use std::ops::{Add, Mul, Sub};
+use std::ops::{Add, Div, Mul, Sub};
 
-#[derive(Clone, Copy, Debug)]
-struct Vec3 {
-    x: f64,
-    y: f64,
-    z: f64,
-}
-
-impl Vec3 {
-    fn new(x: f64, y: f64, z: f64) -> Self {
-        Vec3 { x, y, z }
-    }
-
-    // 向量长度
-    fn length(&self) -> f64 {
-        (self.x * self.x + self.y * self.y + self.z * self.z).sqrt()
-    }
-
-    // 单位向量（方向）
-    fn unit(&self) -> Vec3 {
-        let len = self.length();
-        Vec3::new(self.x / len, self.y / len, self.z / len)
-    }
-
-    // 生成随机向量 [0, 1)
-    fn random() -> Self {
-        Self::random_range(0.0, 1.0)
-    }
-
-    // 生成指定范围的随机向量
-    fn random_range(min: f64, max: f64) -> Self {
-        let mut rng = rand::thread_rng();
-        Vec3::new(
-            rng.gen_range(min..max),
-            rng.gen_range(min..max),
-            rng.gen_range(min..max),
-        )
-    }
-
-    // 生成单位球内的随机点（用于漫反射）
-    fn random_in_unit_sphere() -> Self {
-        loop {
-            let p = Vec3::random_range(-1.0, 1.0);
-            if p.dot(&p) < 1.0 {
-                return p;
-            }
-        }
-    }
-
-    // 生成单位半球内的随机方向（更物理准确）
-    fn random_unit_vector() -> Self {
-        Vec3::random_in_unit_sphere().unit()
-    }
-
-    // 检查向量是否接近零
-    fn near_zero(&self) -> bool {
-        let s = 1e-8;
-        self.x.abs() < s && self.y.abs() < s && self.z.abs() < s
-    }
-
-    // 反射向量
-    fn reflect(&self, n: &Vec3) -> Vec3 {
-        *self - *n * (2.0 * self.dot(n))
-    }
-
-    fn length_squared(&self) -> f64 {
-        self.x * self.x + self.y * self.y + self.z * self.z
-    }
-
-    // 折射向量
-    fn refract(&self, n: &Vec3, etai_over_etat: f64) -> Vec3 {
-        let cos_theta = ((*self * -1.0).dot(n)).min(1.0);
-        let r_out_perp = (*self + *n * cos_theta) * etai_over_etat;
-        let r_out_parallel = *n * (-(1.0 - r_out_perp.length_squared()).abs().sqrt());
-        r_out_perp + r_out_parallel
-    }
-
-    fn cross(&self, other: &Vec3) -> Vec3 {
-        Vec3::new(
-            self.y * other.z - self.z * other.y,
-            self.z * other.x - self.x * other.z,
-            self.x * other.y - self.y * other.x,
-        )
-    }
-}
-
-// 向量加法
-impl Add for Vec3 {
-    type Output = Vec3;
-    fn add(self, other: Vec3) -> Vec3 {
-        Vec3::new(self.x + other.x, self.y + other.y, self.z + other.z)
-    }
-}
-
-// 向量减法
-impl Sub for Vec3 {
-    type Output = Vec3;
-    fn sub(self, other: Vec3) -> Vec3 {
-        Vec3::new(self.x - other.x, self.y - other.y, self.z - other.z)
-    }
-}
-
-impl Mul<Vec3> for Vec3 {
-    type Output = Vec3;
-    fn mul(self, other: Vec3) -> Vec3 {
-        Vec3::new(self.x * other.x, self.y * other.y, self.z * other.z)
-    }
-}
-
-// 向量数乘
-impl Mul<f64> for Vec3 {
-    type Output = Vec3;
-    fn mul(self, t: f64) -> Vec3 {
-        Vec3::new(self.x * t, self.y * t, self.z * t)
-    }
-}
-
-// 光线结构
-#[derive(Clone, Copy, Debug)]
-struct Ray {
-    origin: Vec3,    // 起点
-    direction: Vec3, // 方向
-}
-
-impl Ray {
-    fn at(&self, t: f64) -> Vec3 {
-        self.origin + self.direction * t
-    }
-}
-
+use crate::camera::Camera;
+use crate::hitrecord::{
+    HitRecord, Hittable, HittableList, ScatterResult, Sphere, XYRect, XZRect, YZRect,
+};
+use crate::light::Light;
+use crate::material::{DiffuseLight, Lambertian, Material, Metal, OneWayMaterial};
 use std::fs::File;
 use std::io::Write;
-impl Vec3 {
-    // 向量点积
-    fn dot(&self, other: &Vec3) -> f64 {
-        self.x * other.x + self.y * other.y + self.z * other.z
-    }
-}
-
-enum ScatterResult {
-    Absorbed,    // 光线被吸收
-    Scattered,   // 光线被散射
-    Transmitted, // 光线被透射
-}
-
-// 材质特征
-trait Material: Sync + Send {
-    // 返回是否散射、散射光线、颜色衰减
-    fn scatter(
-        &self,
-        ray_in: &Ray,           // 入射光线
-        rec: &HitRecord,        // 碰撞记录
-        attenuation: &mut Vec3, // 颜色衰减（输出）
-        scattered: &mut Ray,    // 散射光线（输出）
-    ) -> ScatterResult; // 是否发生散射
-
-    fn emitted(&self, _u: f64, _v: f64, _p: &Vec3) -> Vec3 {
-        Vec3::new(0.0, 0.0, 0.0) // 默认不发光
-    }
-}
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-struct DiffuseLight {
-    emit: Vec3, // 发光颜色和强度
-}
-
-impl DiffuseLight {
-    fn new(emit: Vec3) -> Self {
-        DiffuseLight { emit }
-    }
-}
-
-impl Material for DiffuseLight {
-    fn scatter(
-        &self,
-        _ray_in: &Ray,
-        _rec: &HitRecord,
-        _attenuation: &mut Vec3,
-        _scattered: &mut Ray,
-    ) -> ScatterResult {
-        // 不散射光线
-        ScatterResult::Absorbed
+fn sample_direct_light(rec: &HitRecord, world: &dyn Hittable, lights: &[Arc<dyn Light>]) -> Vec3 {
+    if lights.is_empty() {
+        return Vec3::new(0.0, 0.0, 0.0); // 没有光源，返回黑色
     }
 
-    fn emitted(&self, _u: f64, _v: f64, _p: &Vec3) -> Vec3 {
-        self.emit // 返回发光颜色
-    }
-}
+    // 遍历所有光源，累加贡献
+    let mut total_light = Vec3::new(0.0, 0.0, 0.0);
 
-struct Lambertian {
-    albedo: Vec3, // 反射率（材质颜色）
-}
-
-impl Lambertian {
-    fn new(albedo: Vec3) -> Self {
-        Lambertian { albedo }
-    }
-}
-
-impl Material for Lambertian {
-    fn scatter(
-        &self,
-        _ray_in: &Ray,
-        rec: &HitRecord,
-        attenuation: &mut Vec3,
-        scattered: &mut Ray,
-    ) -> ScatterResult {
-        // 计算散射方向
-        let mut scatter_direction = rec.normal + Vec3::random_unit_vector();
-
-        // 处理退化情况（散射方向接近零）
-        if scatter_direction.near_zero() {
-            scatter_direction = rec.normal;
+    for light in lights {
+        // 1. 从光源采样一个点
+        let (light_point, light_normal) = light.sample();
+        // 2. 计算碰撞点到光源点的方向和距离
+        let to_light = light_point - rec.point;
+        let distance_to_light = to_light.length();
+        let direction_to_light = to_light.unit();
+        // 3. 检查是否是背面光照
+        let cos_surface = rec.normal.dot(&direction_to_light);
+        if cos_surface <= 0.0 {
+            continue; // 背面光照，跳过
         }
-
-        // 创建散射光线
-        *scattered = Ray {
+        // 4. 检查光线是否被遮挡
+        let shadow_ray = Ray {
             origin: rec.point,
-            direction: scatter_direction,
+            direction: direction_to_light,
         };
-
-        // 设置颜色衰减
-        *attenuation = self.albedo;
-
-        // 总是发生散射
-        ScatterResult::Scattered
-    }
-}
-
-struct Metal {
-    albedo: Vec3,
-    fuzz: f64, // 模糊度 [0, 1]，0=完美镜面
-}
-
-impl Metal {
-    fn new(albedo: Vec3, fuzz: f64) -> Self {
-        Metal {
-            albedo,
-            fuzz: if fuzz < 1.0 { fuzz } else { 1.0 },
+        let mut shadow_rec = HitRecord::new();
+        if world.hit(
+            &shadow_ray,
+            0.001,
+            distance_to_light - 0.001,
+            &mut shadow_rec,
+        ) {
+            continue; // 被遮挡，跳过
         }
-    }
-}
-
-impl Material for Metal {
-    fn scatter(
-        &self,
-        ray_in: &Ray,
-        rec: &HitRecord,
-        attenuation: &mut Vec3,
-        scattered: &mut Ray,
-    ) -> ScatterResult {
-        let reflected = ray_in.direction.unit().reflect(&rec.normal);
-
-        // 添加模糊（在反射方向周围随机偏移）
-        *scattered = Ray {
-            origin: rec.point,
-            direction: reflected + Vec3::random_in_unit_sphere() * self.fuzz,
-        };
-
-        *attenuation = self.albedo;
-
-        // 只有反射方向向外时才散射
-        if scattered.direction.dot(&rec.normal) > 0.0 {
-            ScatterResult::Scattered
-        } else {
-            ScatterResult::Absorbed
-        }
-    }
-}
-
-struct Dielectric {
-    ir: f64, // 折射率（Index of Refraction）
-}
-
-impl Dielectric {
-    fn new(ir: f64) -> Self {
-        Dielectric { ir }
+        // 5. 计算光源的发光强度
+        let light_power = light.emitted(0.0, 0.0, &light_point);
+        // 6. 计算光源面积和 PDF
+        let light_area = light.area();
+        let pdf = 1.0 / light_area; // 均匀采样概率密度函数
+        // 7. 计算直接光照贡献 L = Le * cos(theta) / (distance^2 * pdf)
+        let direct_light =
+            light_power * cos_surface / (distance_to_light * distance_to_light * pdf);
+        total_light = total_light + direct_light;
     }
 
-    // Schlick 近似：计算菲涅尔反射率
-    fn reflectance(cosine: f64, ref_idx: f64) -> f64 {
-        let r0 = ((1.0 - ref_idx) / (1.0 + ref_idx)).powi(2);
-        r0 + (1.0 - r0) * (1.0 - cosine).powi(5)
-    }
+    total_light
 }
 
-impl Material for Dielectric {
-    fn scatter(
-        &self,
-        ray_in: &Ray,
-        rec: &HitRecord,
-        attenuation: &mut Vec3,
-        scattered: &mut Ray,
-    ) -> ScatterResult {
-        *attenuation = Vec3::new(1.0, 1.0, 1.0); // 玻璃不吸收颜色
-
-        // 计算折射率比
-        let refraction_ratio = if rec.front_face {
-            1.0 / self.ir // 从空气进入玻璃
-        } else {
-            self.ir // 从玻璃进入空气
-        };
-
-        let unit_direction = ray_in.direction.unit();
-        let cos_theta = (unit_direction * -1.0).dot(&rec.normal).min(1.0);
-        let sin_theta = (1.0 - cos_theta * cos_theta).sqrt();
-
-        // 判断是否发生全反射
-        let cannot_refract = refraction_ratio * sin_theta > 1.0;
-
-        let direction = if cannot_refract
-            || Dielectric::reflectance(cos_theta, refraction_ratio)
-                > rand::thread_rng().gen_range(0.0..1.0)
-        {
-            // 反射
-            unit_direction.reflect(&rec.normal)
-        } else {
-            // 折射
-            unit_direction.refract(&rec.normal, refraction_ratio)
-        };
-
-        *scattered = Ray {
-            origin: rec.point,
-            direction,
-        };
-
-        ScatterResult::Scattered
-    }
-}
-
-struct OneWayMaterial {
-    reflect_material: Arc<dyn Material>, // 从内部击中时使用的材质
-}
-
-impl OneWayMaterial {
-    fn new(reflect_material: Arc<dyn Material>) -> Self {
-        OneWayMaterial { reflect_material }
-    }
-}
-
-impl Material for OneWayMaterial {
-    fn scatter(
-        &self,
-        ray_in: &Ray,
-        rec: &HitRecord,
-        attenuation: &mut Vec3,
-        scattered: &mut Ray,
-    ) -> ScatterResult {
-        if rec.front_face {
-            // 从外部击中（相机方向） → 不散射，让光线穿过
-            *attenuation = Vec3::new(1.0, 1.0, 1.0); // 不衰减颜色
-            *scattered = Ray {
-                origin: rec.point,
-                direction: ray_in.direction,
-            };
-            ScatterResult::Transmitted
-        } else {
-            // 从内部击中 → 使用白色漫反射材质
-            self.reflect_material
-                .scatter(ray_in, rec, attenuation, scattered)
-        }
-    }
-}
-
-#[derive(Clone)]
-struct HitRecord {
-    point: Vec3,
-    normal: Vec3,
-    t: f64,
-    front_face: bool,                    // 是否从外部击中
-    material: Option<Arc<dyn Material>>, // 材质
-}
-
-impl HitRecord {
-    fn new() -> Self {
-        HitRecord {
-            point: Vec3::new(0.0, 0.0, 0.0),
-            normal: Vec3::new(0.0, 0.0, 0.0),
-            t: 0.0,
-            front_face: true,
-            material: None,
-        }
-    }
-
-    // 设置法线方向（确保总是指向外侧）
-    fn set_face_normal(&mut self, ray: &Ray, outward_normal: Vec3) {
-        self.front_face = ray.direction.dot(&outward_normal) < 0.0;
-        self.normal = if self.front_face {
-            outward_normal
-        } else {
-            outward_normal * -1.0
-        };
-    }
-}
-
-// 可以被光线击中的物体
-trait Hittable: Sync {
-    fn hit(&self, ray: &Ray, t_min: f64, t_max: f64, rec: &mut HitRecord) -> bool;
-}
-
-struct Sphere {
-    center: Vec3,
-    radius: f64,
-    material: Arc<dyn Material>,
-}
-
-impl Sphere {
-    fn new(center: Vec3, radius: f64, material: Arc<dyn Material>) -> Self {
-        Sphere {
-            center,
-            radius,
-            material,
-        }
-    }
-}
-
-impl Hittable for Sphere {
-    fn hit(&self, ray: &Ray, t_min: f64, t_max: f64, rec: &mut HitRecord) -> bool {
-        let oc = ray.origin - self.center;
-        let a = ray.direction.dot(&ray.direction);
-        let half_b = oc.dot(&ray.direction);
-        let c = oc.dot(&oc) - self.radius * self.radius;
-
-        let discriminant = half_b * half_b - a * c;
-        if discriminant < 0.0 {
-            return false;
-        }
-
-        let sqrtd = discriminant.sqrt();
-        let mut root = (-half_b - sqrtd) / a;
-
-        if root < t_min || root > t_max {
-            root = (-half_b + sqrtd) / a;
-            if root < t_min || root > t_max {
-                return false;
-            }
-        }
-
-        rec.t = root;
-        rec.point = ray.at(rec.t);
-        let outward_normal = (rec.point - self.center) * (1.0 / self.radius);
-        rec.set_face_normal(ray, outward_normal);
-        rec.material = Some(self.material.clone());
-
-        true
-    }
-}
-
-struct HittableList {
-    objects: Vec<Box<dyn Hittable>>,
-}
-
-impl HittableList {
-    fn new() -> Self {
-        HittableList {
-            objects: Vec::new(),
-        }
-    }
-
-    fn add(&mut self, object: Box<dyn Hittable>) {
-        self.objects.push(object);
-    }
-}
-
-impl Hittable for HittableList {
-    fn hit(&self, ray: &Ray, t_min: f64, t_max: f64, rec: &mut HitRecord) -> bool {
-        let mut temp_rec = HitRecord::new();
-        let mut hit_anything = false;
-        let mut closest_so_far = t_max;
-
-        // 遍历所有物体，找最近的碰撞
-        for object in &self.objects {
-            let is_hit = object.hit(ray, t_min, closest_so_far, &mut temp_rec);
-            if is_hit {
-                hit_anything = true;
-                closest_so_far = temp_rec.t; // 更新最近距离
-                *rec = temp_rec.clone(); // 保存碰撞记录
-            }
-        }
-
-        hit_anything
-    }
-}
-
-struct XYRect {
-    x0: f64,
-    x1: f64,
-    y0: f64,
-    y1: f64,
-    k: f64, // z 坐标
-    material: Arc<dyn Material>,
-    flip_normal: bool,
-}
-
-impl XYRect {
-    fn new(x0: f64, x1: f64, y0: f64, y1: f64, k: f64, material: Arc<dyn Material>) -> Self {
-        XYRect {
-            x0,
-            x1,
-            y0,
-            y1,
-            k,
-            material,
-            flip_normal: false,
-        }
-    }
-
-    fn new_flipped(
-        x0: f64,
-        x1: f64,
-        y0: f64,
-        y1: f64,
-        k: f64,
-        material: Arc<dyn Material>,
-    ) -> Self {
-        XYRect {
-            x0,
-            x1,
-            y0,
-            y1,
-            k,
-            material,
-            flip_normal: true,
-        }
-    }
-}
-
-impl Hittable for XYRect {
-    fn hit(&self, ray: &Ray, t_min: f64, t_max: f64, rec: &mut HitRecord) -> bool {
-        if ray.direction.z.abs() < 1e-8 {
-            return false; // 光线平行于平面
-        }
-        // 计算光线与 z=k 平面的交点
-        let t = (self.k - ray.origin.z) / ray.direction.z;
-
-        if t < t_min || t > t_max {
-            return false;
-        }
-
-        // 计算交点的 x, y 坐标
-        let x = ray.origin.x + t * ray.direction.x;
-        let y = ray.origin.y + t * ray.direction.y;
-
-        // 检查是否在矩形范围内
-        if x < self.x0 || x > self.x1 || y < self.y0 || y > self.y1 {
-            return false;
-        }
-
-        // 记录碰撞信息
-        rec.t = t;
-        rec.point = ray.at(t);
-        // 根据 flip_normal 决定法线方向
-        let outward_normal = if self.flip_normal {
-            Vec3::new(0.0, 0.0, -1.0) // z 轴负方向
-        } else {
-            Vec3::new(0.0, 0.0, 1.0) // z 轴正方向
-        };
-        rec.set_face_normal(ray, outward_normal);
-        rec.material = Some(self.material.clone());
-
-        true
-    }
-}
-
-struct XZRect {
-    x0: f64,
-    x1: f64,
-    z0: f64,
-    z1: f64,
-    k: f64, // y 坐标
-    material: Arc<dyn Material>,
-}
-
-impl XZRect {
-    fn new(x0: f64, x1: f64, z0: f64, z1: f64, k: f64, material: Arc<dyn Material>) -> Self {
-        XZRect {
-            x0,
-            x1,
-            z0,
-            z1,
-            k,
-            material,
-        }
-    }
-}
-
-impl Hittable for XZRect {
-    fn hit(&self, ray: &Ray, t_min: f64, t_max: f64, rec: &mut HitRecord) -> bool {
-        if ray.direction.y.abs() < 1e-8 {
-            return false; // 光线平行于平面
-        }
-        let t = (self.k - ray.origin.y) / ray.direction.y;
-
-        if t < t_min || t > t_max {
-            return false;
-        }
-
-        let x = ray.origin.x + t * ray.direction.x;
-        let z = ray.origin.z + t * ray.direction.z;
-
-        if x < self.x0 || x > self.x1 || z < self.z0 || z > self.z1 {
-            return false;
-        }
-
-        rec.t = t;
-        rec.point = ray.at(t);
-        let outward_normal = Vec3::new(0.0, 1.0, 0.0); // y 轴正方向
-        rec.set_face_normal(ray, outward_normal);
-        rec.material = Some(self.material.clone());
-
-        true
-    }
-}
-
-struct YZRect {
-    y0: f64,
-    y1: f64,
-    z0: f64,
-    z1: f64,
-    k: f64, // x 坐标
-    material: Arc<dyn Material>,
-}
-
-impl YZRect {
-    fn new(y0: f64, y1: f64, z0: f64, z1: f64, k: f64, material: Arc<dyn Material>) -> Self {
-        YZRect {
-            y0,
-            y1,
-            z0,
-            z1,
-            k,
-            material,
-        }
-    }
-}
-
-impl Hittable for YZRect {
-    fn hit(&self, ray: &Ray, t_min: f64, t_max: f64, rec: &mut HitRecord) -> bool {
-        if ray.direction.x.abs() < 1e-8 {
-            return false; // 光线平行于平面
-        }
-        let t = (self.k - ray.origin.x) / ray.direction.x;
-
-        if t < t_min || t > t_max {
-            return false;
-        }
-
-        let y = ray.origin.y + t * ray.direction.y;
-        let z = ray.origin.z + t * ray.direction.z;
-
-        if y < self.y0 || y > self.y1 || z < self.z0 || z > self.z1 {
-            return false;
-        }
-
-        rec.t = t;
-        rec.point = ray.at(t);
-        let outward_normal = Vec3::new(1.0, 0.0, 0.0); // x 轴正方向
-        rec.set_face_normal(ray, outward_normal);
-        rec.material = Some(self.material.clone());
-
-        true
-    }
-}
-
-struct Camera {
-    origin: Vec3,
-    lower_left_corner: Vec3,
-    horizontal: Vec3,
-    vertical: Vec3,
-}
-
-impl Camera {
-    fn new(
-        lookfrom: Vec3,    // 相机位置
-        lookat: Vec3,      // 看向的点
-        vup: Vec3,         // 上方向
-        vfov: f64,         // 垂直视野角度（度）
-        aspect_ratio: f64, // 宽高比
-    ) -> Self {
-        let theta = vfov.to_radians();
-        let h = (theta / 2.0).tan();
-        let viewport_height = 2.0 * h;
-        let viewport_width = aspect_ratio * viewport_height;
-
-        // 构建相机坐标系
-        let w = (lookfrom - lookat).unit(); // 相机朝向（反方向）
-        let u = vup.cross(&w).unit(); // 相机右方向
-        let v = w.cross(&u); // 相机上方向
-
-        let origin = lookfrom;
-        let horizontal = u * viewport_width;
-        let vertical = v * viewport_height;
-        let lower_left_corner = origin - horizontal * 0.5 - vertical * 0.5 - w;
-
-        Camera {
-            origin,
-            lower_left_corner,
-            horizontal,
-            vertical,
-        }
-    }
-
-    fn get_ray(&self, s: f64, t: f64) -> Ray {
-        Ray {
-            origin: self.origin,
-            direction: self.lower_left_corner + self.horizontal * s + self.vertical * t
-                - self.origin,
-        }
-    }
-}
-
-fn ray_color(ray: &Ray, world: &dyn Hittable, depth: i32) -> Vec3 {
+fn ray_color(ray: &Ray, world: &dyn Hittable, lights: &[Arc<dyn Light>], depth: i32) -> Vec3 {
     if !ray.direction.x.is_finite() || !ray.direction.y.is_finite() || !ray.direction.z.is_finite()
     {
         // eprintln!("光线方向包含非有限值: {:?}", ray.direction);
-        return Vec3::new(1.0, 0.0, 1.0);
+        return Vec3::new(0.0, 0.0, 0.0);
     }
     if depth <= 0 {
         return Vec3::new(0.0, 0.0, 0.0);
@@ -746,11 +102,11 @@ fn ray_color(ray: &Ray, world: &dyn Hittable, depth: i32) -> Vec3 {
             ScatterResult::Absorbed => {
                 emitted // 光线被吸收，只返回发光部分
             }
-            ScatterResult::Transmitted => emitted + ray_color(&scattered, world, depth - 1),
+            ScatterResult::Transmitted => emitted + ray_color(&scattered, world, lights, depth - 1),
             ScatterResult::Scattered => {
-                // 递归追踪散射光线，乘以衰减系数
-                // 需要注意这里的顺序，先加上发光部分，再乘以衰减后的散射部分
-                emitted + ray_color(&scattered, world, depth - 1) * attenuation
+                let direct_light = sample_direct_light(&rec, world, &lights);
+                let indirect_light = ray_color(&scattered, world, lights, depth - 1);
+                emitted + (direct_light + indirect_light) * attenuation
             }
         };
     }
@@ -785,28 +141,30 @@ struct Config {
 const RELEASE_CONFIG: Config = Config {
     image_width: 900,
     image_height: 600,
-    samples_per_pixel: 100,
-    max_depth: 50,
+    samples_per_pixel: 300,
+    max_depth: 30,
 };
 
 const DEBUG_CONFIG: Config = Config {
     image_width: 300,
     image_height: 200,
-    samples_per_pixel: 100,
-    max_depth: 50,
+    samples_per_pixel: 20,
+    max_depth: 10,
 };
 
 const BOX_SIZE: f64 = 2.0;
 
-fn cornell_box() -> HittableList {
+fn cornell_box() -> (HittableList, Vec<Arc<dyn Light>>) {
     let mut world = HittableList::new();
+
+    let mut lights: Vec<Arc<dyn Light>> = Vec::new();
 
     // 创建材质
     let red = Arc::new(Lambertian::new(Vec3::new(0.65, 0.05, 0.05)));
     let white = Arc::new(Lambertian::new(Vec3::new(0.73, 0.73, 0.73)));
     let green = Arc::new(Lambertian::new(Vec3::new(0.12, 0.45, 0.15)));
     let blue = Arc::new(Lambertian::new(Vec3::new(0.05, 0.05, 0.65)));
-    let light = Arc::new(DiffuseLight::new(Vec3::new(15.0, 15.0, 15.0)));
+    let light = Arc::new(DiffuseLight::new(Vec3::new(10.0, 10.0, 10.0)));
 
     // 单向墙材质（内部反射为白色）
     let one_way = Arc::new(OneWayMaterial::new(white.clone()));
@@ -866,17 +224,28 @@ fn cornell_box() -> HittableList {
     // === 光源 ===
     // 天花板中央的方形光源 - XZ 平面，y = 0. 99
     world.add(Box::new(XZRect::new(
+        -0.25,
+        0.25, // x 范围：中央 0.5 宽
+        -0.25,
+        0.25, // z 范围：中央 0.5 宽
+        0.99, // y 坐标：略低于天花板
+        light.clone(),
+    )));
+
+    let light_rect = Arc::new(XZRect::new(
         -0.25, 0.25, // x 范围：中央 0.5 宽
         -0.25, 0.25, // z 范围：中央 0.5 宽
         0.99, // y 坐标：略低于天花板
         light,
-    )));
+    ));
+    lights.push(light_rect);
 
-    world
+    (world, lights)
 }
 
 fn main() {
-    let config = DEBUG_CONFIG;
+    // let config = DEBUG_CONFIG;
+    let config = RELEASE_CONFIG;
     let width = config.image_width;
     let height = config.image_height;
 
@@ -887,7 +256,21 @@ fn main() {
     let aspect_ratio = width as f64 / height as f64;
 
     // 创建场景
-    let world = cornell_box();
+    let (mut world, lights) = cornell_box();
+
+    // 添加金属球体
+    world.add(Box::new(Sphere::new(
+        Vec3::new(0.0, -0.5 + 0.2, 0.5),
+        0.2,
+        Arc::new(Metal::new(Vec3::new(0.8, 0.6, 0.2), 0.1)),
+    )));
+
+    // 添加玻璃球体
+    world.add(Box::new(Sphere::new(
+        Vec3::new(0.0, -0.2, -1.0),
+        0.3,
+        Arc::new(material::Dielectric::new(1.5)),
+    )));
 
     // 创建相机
     let lookfrom = Vec3::new(0.0, 0.0, -3.0); // 相机在前方 3 个单位
@@ -927,7 +310,7 @@ fn main() {
                 let v = (*j as f64 + random_v) / (height - 1) as f64;
 
                 let ray = camera.get_ray(u, v);
-                pixel_color = pixel_color + ray_color(&ray, &world, max_depth);
+                pixel_color = pixel_color + ray_color(&ray, &world, &lights, max_depth);
             }
 
             // 更新进度
@@ -965,7 +348,7 @@ mod tests {
 
     #[test]
     fn test_vec3_operations() {
-        let world = cornell_box();
+        let (world, lights) = cornell_box();
 
         let lookfrom = Vec3::new(0.0, 0.0, -3.0);
         let lookat = Vec3::new(0.0, 0.0, 0.0);
@@ -992,7 +375,7 @@ mod tests {
             // 使用多次采样来获得更稳定的结果
             let mut total_color = Vec3::new(0.0, 0.0, 0.0);
             for _ in 0..10 {
-                total_color = total_color + ray_color(&ray, &world, 50);
+                total_color = total_color + ray_color(&ray, &world, &lights, 50);
             }
 
             let (r, g, b) = write_color(total_color, 10);
